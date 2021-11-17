@@ -1,5 +1,75 @@
 from enum import IntEnum
-from typing import List
+from typing import List, Optional, Tuple
+
+from copy import deepcopy
+from itertools import combinations
+
+# Do not print anything besides the tree in your submission.
+# Implement all methods, the __str__ methods are optional (for nice labels).
+# However if you wish, you can completely change structure of the code.
+# What we care about is that the tree is exported in valid format.
+
+infoset_counter = 0
+infoset_map_agent = {}
+infoset_map_bandit = {}
+
+class HistoryType(IntEnum):
+    decision = 1
+    chance = 2
+    terminal = 3
+
+
+class Player(IntEnum):
+    agent = 0
+    bandit = 1
+
+
+class ActionType(IntEnum):
+    GoLeft = 1
+    GoRight = 2
+    GoUp = 3
+    GoDown = 4
+    Ambushed = 5
+    Defended = 6
+    PlaceBandits = 7
+    SwapPlace = 8
+    Stay = 9
+
+    def opposite(self):
+        return {
+            ActionType.GoLeft: ActionType.GoRight,
+            ActionType.GoRight: ActionType.GoLeft,
+            ActionType.GoUp: ActionType.GoDown,
+            ActionType.GoDown: ActionType.GoUp,
+        }[self]
+
+    def __str__(self):
+        return self.name
+
+
+class Action:
+    def __init__(self,
+                 action_type: ActionType,
+                 position: Optional['Pos'] = None,
+                 target: Optional['Pos'] = None):
+        self.action_type = action_type
+        self.pos = position
+        self.target = target
+
+    def __str__(self):
+        if self.action_type == ActionType.SwapPlace:
+            return f"{self.action_type.name} {self.pos} -> {self.target}"
+        if self.action_type == ActionType.PlaceBandits:
+            return f"{self.action_type.name} {self.pos}"
+        return f"{self.action_type.name}"
+
+    def __repr__(self):
+        if self.action_type == ActionType.SwapPlace:
+            return f"{self.action_type.name} {self.pos} -> {self.target}"
+        if self.action_type == ActionType.PlaceBandits:
+            return f"{self.action_type.name} {self.pos}"
+        return f"{self.action_type.name}"
+
 
 class Tile(IntEnum):
     blocked = 0
@@ -22,25 +92,33 @@ def map_tile(c: str):
         'D': Tile.goal,
     }[c]
 
-class Node:
-    def __init__(self, pos, actions, final=False):
-        self.y, self.x = pos
-        self.final = final
-        self.actions = actions
+
+class Pos:
+    def __init__(self, x: int, y: int):
+        self.x = x
+        self.y = y
+
+    def apply_action(self, action: Action) -> 'Pos':
+        return {
+            ActionType.GoRight: Pos(self.x+1, self.y),
+            ActionType.GoLeft: Pos(self.x-1, self.y),
+            ActionType.GoDown: Pos(self.x, self.y+1),
+            ActionType.GoUp: Pos(self.x, self.y-1),
+        }[action.action_type]
+
+    def __eq__(self, o):
+        return self.x == o.x and self.y == o.y
+
+    def __hash__(self):
+        return hash(f"{self.x} {self.y}")
 
     def __str__(self):
-        return f"[{self.x}, {self.y}] {'/FINAL/ ' if self.final else ''}({' '.join(map(lambda x: f'{x}', self.actions))})"
+        return f"[{self.x}, {self.y}]"
 
-class Connection:
-    def __init__(self, dst_i, events):
-        self.dst_i = dst_i
-        self.events = events
+    def __repr__(self):
+        return f"[{self.x}, {self.y}]"
 
-    def __str__(self):
-        return f"to {self.dst_i} ({' '.join(map(lambda x: f'{x}', self.events))})"
-
-
-class Maze:
+class Game:
     def __init__(self):
         h = int(input())
         w = int(input())
@@ -50,160 +128,225 @@ class Maze:
         self.n_bandits = int(input())
         self.ambush_prob = float(input())
 
-        self.start_i = None
-        self.walkgraph = self.__create_walkgraph()
-
-    def __create_walkgraph(self):
-        self.nodes = []
+        self.start_pos = None
+        self.dangers = []
         for i, row in enumerate(self.mazebox):
             for j, tile in enumerate(row):
-                if tile == Tile.blocked:
-                    continue
-                actions = self.__get_actions(i, j)
                 if tile == Tile.start:
-                    self.start_i = len(self.nodes)
-                    self.nodes.append(Node([i, j], actions))
-                elif tile == Tile.goal:
-                    self.nodes.append(Node([i, j], actions, final=True))
-                elif len(actions) > 2: # it is not only Go, there is a potential for deciding
-                    self.nodes.append(Node([i, j], actions))
+                    self.start_pos = Pos(j, i)
+                if tile == Tile.danger:
+                    self.dangers.append(Pos(j, i))
 
-        self.connections = [{} for _ in self.nodes]
-        for node_i, node in enumerate(self.nodes):
-            for a in node.actions:
-                if a not in self.connections[node_i]:
-                    x_conn, y_conn, in_action, events = self.__walk_Go(node.x, node.y, a)
-                    conn_node_i = None
-                    for i, other_node in enumerate(self.nodes):
-                        if other_node.x == x_conn and other_node.y == y_conn:
-                            conn_node_i = i
-                            break
-                    self.connections[node_i][a] = Connection(conn_node_i, events)
-                    self.connections[conn_node_i][in_action] = Connection(node_i, list(reversed(events)))
-
-    def __get_actions(self, y, x):
+    def get_actions(self, pos: Pos) -> List[Action]:
         actions = []
-        if self.mazebox[y][x+1] != Tile.blocked:
-            actions.append(Action.GoRight)
-        if self.mazebox[y][x-1] != Tile.blocked:
-            actions.append(Action.GoLeft)
-        if self.mazebox[y+1][x] != Tile.blocked:
-            actions.append(Action.GoDown)
-        if self.mazebox[y-1][x] != Tile.blocked:
-            actions.append(Action.GoUp)
+        if self.mazebox[pos.y][pos.x+1] != Tile.blocked:
+            actions.append(Action(ActionType.GoRight))
+        if self.mazebox[pos.y][pos.x-1] != Tile.blocked:
+            actions.append(Action(ActionType.GoLeft))
+        if self.mazebox[pos.y+1][pos.x] != Tile.blocked:
+            actions.append(Action(ActionType.GoDown))
+        if self.mazebox[pos.y-1][pos.x] != Tile.blocked:
+            actions.append(Action(ActionType.GoUp))
         return actions
 
-    def __apply_action(self, x, y, action):
-        return {
-            Action.GoRight: [x+1, y],
-            Action.GoLeft: [x-1, y],
-            Action.GoDown: [x, y+1],
-            Action.GoUp: [x, y-1],
-        }[action]
-
-    def __walk_Go(self, x_in, y_in, action):
-        x, y = self.__apply_action(x_in, y_in, action)
-        actions = self.__get_actions(y, x)
+    def walk_path(self, pos: Pos, action: Action) -> List[Tuple[Tile, Action, Pos]]:
         events = []
-        while len(actions) == 2 and self.mazebox[y][x] not in [Tile.goal, Tile.start]:
-            if self.mazebox[y][x] == Tile.danger:
-                events.append(Tile.danger)
-            elif self.mazebox[y][x] == Tile.gold:
-                events.append(Tile.gold)
-            op_a = action.opposite()
-            action = actions[0] if actions[0] != op_a else actions[1]
-            x, y = self.__apply_action(x, y, action)
-            actions = self.__get_actions(y, x)
-        return x, y, action.opposite(), events
+        while True:
+            pos = pos.apply_action(action)
+            if self.at(pos) in [Tile.danger, Tile.gold]:
+                events.append((self.at(pos), action, pos))
+            actions = self.get_actions(pos)
+            if len(actions) != 2 or self.at(pos) in [Tile.goal, Tile.start]:
+                break
+            action = actions[0] if (actions[0].action_type != action.action_type.opposite()) else actions[1]
+        events.append((None, action, pos))
+        return events
 
-    def __str__(self):
-        res = "MAZE:\n"
-        res += f"start node index: {self.start_i}\n"
-        for i, node in enumerate(self.nodes):
-            res += f"\tNODE {i}:\n"
-            res += f"\t{node}\n"
-            for a, connection in self.connections[i].items():
-                res += f"\t\t{a} - {connection}\n"
-            # res += "\n"
-        return res
+    def at(self, pos: Pos) -> Tile:
+        return self.mazebox[pos.y][pos.x]
 
-# Do not print anything besides the tree in your submission.
-# Implement all methods, the __str__ methods are optional (for nice labels).
-# However if you wish, you can completely change structure of the code.
-# What we care about is that the tree is exported in valid format.
-
-class HistoryType(IntEnum):
-    decision = 1
-    chance = 2
-    terminal = 3
-
-
-class Player(IntEnum):
-    agent = 0
-    bandit = 1
-
-
-# class ActionType(IntEnum):
-#     walk = 1
-
-class Action(IntEnum):
-    GoLeft = 1
-    GoRight = 2
-    GoUp = 3
-    GoDown = 4
-    Ambushed = 5
-    Defended = 6
-    SwapPlace = 7
-
-    def opposite(self):
-        return {
-            Action.GoLeft: Action.GoRight,
-            Action.GoRight: Action.GoLeft,
-            Action.GoUp: Action.GoDown,
-            Action.GoDown: Action.GoUp,
-            Action.Ambushed: Action.Ambushed,
-            Action.Defended: Action.Defended,
-            Action.SwapPlace: Action.SwapPlace,
-        }[self]
-
-    def __str__(self):
-        return self.name  # action label
-
+    def goal(self, pos: Pos) -> bool:
+        return self.mazebox[pos.y][pos.x] == Tile.goal
 
 class Infoset:
-    def index(self) -> int:
-        raise NotImplementedError
+    def __init__(self, curr_history: 'History'):
+        self.h = curr_history
+
+    def index(self) -> str:
+        global infoset_counter, infoset_map_agent, infoset_map_bandit
+        if self.h.player == Player.agent:
+            id_infoset = "1" + f"{self.h.crossroad_actions} {self.h.n_bandits} {self.h.gold} {self.h.curr_pos} {self.h.combat_points} {self.h.seen_danger}"
+            # print(id_infoset)
+            if id_infoset not in infoset_map_agent:
+                infoset_map_agent[id_infoset] = infoset_counter
+                infoset_counter += 1
+            return infoset_map_agent[id_infoset]
+        if self.h.player == Player.bandit:
+            id_infoset = "2"+" ".join(map(lambda x: f"{x}", self.h.bandits_positions))+f"{self.h.curr_pos}"
+            # print(id_infoset)
+            if id_infoset not in infoset_map_agent:
+                infoset_map_bandit[id_infoset] = infoset_counter
+                infoset_counter += 1
+            return infoset_map_bandit[id_infoset]
+        # else:
+        #     print("This does not happen")
 
     def __str__(self):
-        raise NotImplementedError
+        return ""
 
 
 class History:
-    def __init__(self, maze: Maze):
-        self.maze = maze
+    def __init__(self, game: Game):
+        self.game = game
+        self.player = Player.bandit
+        if game.n_bandits <= 0 or len(game.dangers) == 0:
+            self.player = Player.agent
+
+        # agent's information
+        self.visited_crossroads = []
+        self.combat_points = []
+        self.crossroad_actions = []
+        self.last_action = None
+        self.gold = 0
+        self.n_bandits = game.n_bandits
+        self.dead = False
+        self.seen_danger = False
+        self.event_buffer = []
+
+        # somewhat shared information
+        self.curr_pos = game.start_pos
+
+        # bandits' information
+        self.bandits_positions = set()
+        self.bandit_swapped = None
+
+    def __ambush(self):
+        return self.curr_pos in self.bandits_positions
+
+    def __stuck(self):
+        return self.curr_pos in self.visited_crossroads
+
+    def __agent_actions(self):
+        if self.game.goal(self.curr_pos) or self.__stuck() or self.dead:
+            return []
+        actions = self.game.get_actions(self.curr_pos)
+        back_a_t = self.last_action.action_type.opposite() if self.last_action is not None else None
+        return list(filter(lambda a: a.action_type != back_a_t, actions))
+
+    def __all_swappings(self):
+        swaps = []
+        non_targetable = list(self.bandits_positions) + [self.curr_pos]
+        for danger in self.game.dangers:
+            if danger not in non_targetable:
+                for source in self.bandits_positions:
+                    swaps.append(Action(ActionType.SwapPlace, source, danger))
+        # print(swaps)
+        return swaps
+
+    def __exec_events(self):
+        i = 0
+        for event in self.event_buffer:
+            i += 1
+            tile, action, pos = event
+            self.last_action = action
+            self.curr_pos = pos
+            if tile is None:
+                self.event_buffer = []
+                self.player = Player.agent
+                return
+            if tile == Tile.gold:
+                self.gold += 1
+            elif tile == Tile.danger:
+                if self.__ambush():
+                    self.seen_danger = True
+                    break
+                if not self.seen_danger:
+                    self.seen_danger = True
+                    self.player = Player.bandit
+                    break
+        self.event_buffer = self.event_buffer[i:]
+
 
     def type(self) -> HistoryType:
-        raise NotImplementedError
+        if self.dead or (len(self.event_buffer) == 0 and len(self.__agent_actions()) == 0):
+            return HistoryType.terminal
+        if self.__ambush():
+            return HistoryType.chance
+        return HistoryType.decision
 
     def current_player(self) -> Player:
-        raise NotImplementedError
+        return self.player
 
     # infoset index: histories with the same infoset index belong to the same infoset
     def infoset(self) -> Infoset:
-        raise NotImplementedError
+        return Infoset(self)
 
     def actions(self) -> List[Action]:
-        raise NotImplementedError
+        if self.__ambush():
+            return [Action(ActionType.Ambushed), Action(ActionType.Defended)]
+        actions = []
+        if self.player == Player.bandit:
+            if self.last_action == None:
+                for c in combinations(self.game.dangers, self.game.n_bandits):
+                    actions.append(Action(ActionType.PlaceBandits, c))
+            # cannot be an ambush at this point -> swap
+            elif self.game.at(self.curr_pos) == Tile.danger:
+                actions = [Action(ActionType.Stay)] + self.__all_swappings()
+            else:
+                print("PROBLEMATIC SITUATION")
+        else:
+            actions = self.__agent_actions()
+        return actions
 
     # for player 1
     def utility(self) -> float:
-        raise NotImplementedError
+        if self.game.goal(self.curr_pos):
+            return 10 + self.gold
+        else:
+            return 0
 
     def chance_prob(self, action: Action) -> float:
-        raise NotImplementedError
+        if action.action_type == ActionType.Ambushed:
+            return self.game.ambush_prob
+        else:
+            return 1 - self.game.ambush_prob
 
     def child(self, action: Action) -> 'History':
-        raise NotImplementedError
+        next_h = deepcopy(self)
+        if action.action_type == ActionType.Ambushed:
+            next_h.dead = True
+        elif action.action_type == ActionType.Defended:
+            next_h.n_bandits -= 1
+            next_h.bandits_positions.remove(self.curr_pos)
+            next_h.combat_points.append(self.curr_pos)
+            next_h.__exec_events()
+        elif self.player == Player.agent:
+            # next_h.curr_pos = next_h.curr_pos.apply_action(action)
+            next_h.crossroad_actions.append(action)
+            next_h.visited_crossroads.append(self.curr_pos)
+            next_h.event_buffer = self.game.walk_path(self.curr_pos, action)
+            # for b in next_h.event_buffer:
+            #     print(b)
+            next_h.__exec_events()
+        else:
+            if action.action_type == ActionType.PlaceBandits:
+                next_h.bandits_positions = set(action.pos)
+                next_h.player = Player.agent
+            elif action.action_type == ActionType.SwapPlace:
+                next_h.bandits_positions.remove(action.pos)
+                next_h.bandits_positions.add(action.target)
+                next_h.bandit_swapped = (action.pos, action.target)
+                next_h.__exec_events()
+            elif action.action_type == ActionType.Stay:
+                next_h.__exec_events()
+            else:
+                print("OOF, a problem with actions :D")
+        # for b in next_h.event_buffer:
+        #     print(b)
+        # if action.action_type == ActionType.SwapPlace:
+        #     print(action, self.curr_pos, self.__all_swappings(), self.bandits_positions)
+        # print(action, next_h.curr_pos, next_h.type(), next_h.utility())
+        return next_h
 
     def __str__(self):
         return ""  # history label
@@ -212,9 +355,8 @@ class History:
 
 # read the maze from input and return the root node
 def create_root() -> History:
-    maze = Maze()
-    print(maze)
-    return History(maze)
+    game = Game()
+    return History(game)
 
 
 
