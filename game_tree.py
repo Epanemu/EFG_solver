@@ -184,7 +184,7 @@ class Infoset:
         if self.h.player == Player.bandit:
             id_infoset = "2"+" ".join(map(lambda x: f"{x}", self.h.bandits_positions))+f"{self.h.curr_pos}"
             # print(id_infoset)
-            if id_infoset not in infoset_map_agent:
+            if id_infoset not in infoset_map_bandit:
                 infoset_map_bandit[id_infoset] = infoset_counter
                 infoset_counter += 1
             return infoset_map_bandit[id_infoset]
@@ -219,6 +219,8 @@ class History:
         # bandits' information
         self.bandits_positions = set()
         self.bandit_swapped = None
+
+        self.iset = Infoset(self)
 
     def __ambush(self):
         return self.curr_pos in self.bandits_positions
@@ -279,7 +281,7 @@ class History:
 
     # infoset index: histories with the same infoset index belong to the same infoset
     def infoset(self) -> Infoset:
-        return Infoset(self)
+        return self.iset
 
     def actions(self) -> List[Action]:
         if self.__ambush():
